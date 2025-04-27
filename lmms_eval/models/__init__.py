@@ -72,6 +72,7 @@ AVAILABLE_MODELS = {
     "whisper": "Whisper",
     "whisper_vllm": "WhisperVllm",
     "vora": "VoRA",
+    "liquid_v1_7b": "LiquidV1_7B",
 }
 
 
