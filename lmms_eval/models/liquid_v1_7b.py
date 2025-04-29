@@ -13,7 +13,7 @@ from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
 )
-
+import copy
 from lmms_eval import utils
 from lmms_eval.api.instance import Instance
 from lmms_eval.api.model import lmms
@@ -208,6 +208,7 @@ class LiquidV1_7B(lmms):
             result.paste(pil_img, ((height - width) // 2, 0))
             return result
 
+    # TODO: understand this function
     def tokenizer_image_token(self, prompt, image_token_index=None, return_tensors=None):
         """Tokenize a prompt with image token placeholders."""
         if image_token_index is None:
@@ -270,6 +271,7 @@ class LiquidV1_7B(lmms):
             
         return vqcode
 
+    # TODO: understand this function
     def prepare_inputs_with_images(self, context, visual_paths):
         """Prepare inputs with embedded images."""
         if not visual_paths or not self.image_tokenizer:
@@ -305,6 +307,59 @@ class LiquidV1_7B(lmms):
             cur_input_ids.append(text_ids[image_token_indices[i]+1:image_token_indices[i+1]])
             if i < num_images:
                 cur_input_ids.append(vqcode)
+                
+        input_ids = torch.cat(cur_input_ids, dim=0)
+        
+        self.debug_print(f"Final input_ids shape: {input_ids.shape}")
+            
+        return {
+            "input_ids": input_ids.unsqueeze(0).to(self.device),
+        }
+        
+    def prepare_inputs_with_multiple_images(self, context, visual_paths):
+        """Prepare inputs with multiple embedded images."""
+        if not visual_paths or not self.image_tokenizer:
+            # No visual input or tokenizer not available
+            self.debug_print("No visual input or tokenizer not available. Processing text only.")
+            inputs = self.tokenizer([context], return_tensors="pt").to(self.device)
+            return inputs
+            
+        # Process with image tokens
+        prompt = ""
+        for i in range(len(visual_paths)):
+            # Add image placeholder before each image reference in the text
+            # Format could be adjusted based on your model's requirements
+            prompt += '<boi><image><eoi>' + '\n'
+        
+        prompt += context
+            
+        self.debug_print(f"Preparing prompt with {len(visual_paths)} images: {prompt[:100]}...")
+            
+        text_ids = self.tokenizer_image_token(prompt, return_tensors='pt')
+        
+        # Process all images
+        vqcodes = []
+        for visual_path in visual_paths:
+            vqcode = self.process_image(visual_path)
+            vqcodes.append(vqcode)
+        
+        # Insert image tokens
+        num_images = (text_ids == self.IMAGE_TOKEN_INDEX).sum()
+        
+        if num_images != len(vqcodes):
+            self.debug_print(f"Warning: Found {num_images} image tokens but {len(vqcodes)} images provided")
+            # Use the minimum to avoid errors
+            num_images = min(num_images, len(vqcodes))
+        
+        self.debug_print(f"Inserting {num_images} images into the prompt")
+            
+        image_token_indices = [-1] + torch.where(text_ids == self.IMAGE_TOKEN_INDEX)[0].tolist() + [text_ids.shape[0]]
+        
+        cur_input_ids = []
+        for i in range(num_images + 1):
+            cur_input_ids.append(text_ids[image_token_indices[i]+1:image_token_indices[i+1]])
+            if i < num_images:
+                cur_input_ids.append(vqcodes[i])
                 
         input_ids = torch.cat(cur_input_ids, dim=0)
         
@@ -378,13 +433,14 @@ class LiquidV1_7B(lmms):
             self.debug_print(f"Generation parameters: max_new_tokens={max_new_tokens}, temperature={temperature}, top_p={top_p}, do_sample={do_sample}")
             
             answers = []
-            
+
             for i, context in enumerate(contexts):
                 if self.debug:
                     print(f"\n--- Request {i+1}/{len(contexts)} ---")
                     print(f"Input context: {context[:200]}...")
                 
                 # Prepare model inputs with images if available
+                # TODO: check whether support multiple images qa input ?
                 current_visual = visuals[i] if i < len(visuals) else None
                 
                 # Use conversation template 
@@ -411,7 +467,10 @@ class LiquidV1_7B(lmms):
                         else:
                             print(f"Visual type: {type(current_visual)}")
                     
-                    inputs = self.prepare_inputs_with_images(context, current_visual)
+                    if isinstance(current_visual, list) and len(current_visual) > 1:
+                        inputs = self.prepare_inputs_with_multiple_images(context, current_visual)
+                    else:
+                        inputs = self.prepare_inputs_with_images(context, current_visual)
                 else:
                     if self.debug:
                         print(f"No visual input provided. Using text-only input.")
@@ -420,28 +479,32 @@ class LiquidV1_7B(lmms):
                 # Generate text
                 with torch.no_grad():
                     self.debug_print(f"Starting text generation...")
-                        
+                    inputs_embeds = self.model.model.embed_tokens(inputs["input_ids"])
                     outputs = self.model.generate(
-                        **inputs,
+                        inputs_embeds=inputs_embeds,
                         max_new_tokens=max_new_tokens,
                         do_sample=do_sample,
                         temperature=temperature,
                         top_p=top_p,
-                        use_cache=self.use_cache,
+                        use_cache=False,
                         pad_token_id=self.tokenizer.pad_token_id,
                         eos_token_id=self.tokenizer.eos_token_id,
+                        bos_token_id=self.tokenizer.bos_token_id,
                     )
                     
                     self.debug_print(f"Generation completed. Output shape: {outputs.shape}")
                 
                 # Decode and format the output
-                if current_visual:
-                    # For text with images, we need to handle the indices differently
-                    generated_text = self.tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-                else:
-                    # For text-only, we can use standard decoding
-                    input_length = inputs.input_ids.shape[1]
-                    generated_text = self.tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
+                # if current_visual:
+                #     # For text with images, we need to handle the indices differently
+                #     generated_text = self.tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+                # else:
+                #     # For text-only, we can use standard decoding
+                #     input_length = inputs.input_ids.shape[1]
+                #     generated_text = self.tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
+                generated_text = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)[0].strip()
+                print(f"Generated text: {generated_text}...")
+                org_generated_text = generated_text
                 
                 # Clean up special tokens and add to results
                 for special_token in ["<boi>", "<eoi>"]:
@@ -455,6 +518,18 @@ class LiquidV1_7B(lmms):
                     print(f"\n{box_line}\nGENERATED RESPONSE:\n{generated_text}\n{box_line}")
                     print(f"Response length: {len(generated_text)}")
                     print("--- End of request ---\n")
+                    
+                if generated_text == "":
+                    # log original generated text
+                    print("Warning: Generated text is empty after processing.")
+                    print(f"Original generated text: {org_generated_text}")
+                
+                if "Answer:" in generated_text:
+                    # Remove the "Answer:" prefix if present
+                    generated_text = generated_text.split("Answer:")[-1].strip()
+                if "answer:" in generated_text:
+                    # Remove the "answer:" prefix if present
+                    generated_text = generated_text.split("answer:")[-1].strip()
                 
                 answers.append(generated_text)
                 

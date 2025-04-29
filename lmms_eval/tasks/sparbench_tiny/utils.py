@@ -246,6 +246,9 @@ def exact_match(pred, target):
     # return 1. if pred.lower() == target.lower() else 0.
     pred = pred.lower()
     target = target.lower()
+    if pred == "":
+        return 0.
+    
     if pred.lower() == target.lower():
         return 1.
     elif pred in target:
@@ -344,4 +347,5 @@ def sparbench_aggregate_results(results):
     output['High'] = np.mean(high_list)
 
     eval_logger.info(f"Evaluation results: {output}")
+    
     return output['overall'] * 100.

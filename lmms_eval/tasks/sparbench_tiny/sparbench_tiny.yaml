@@ -12,6 +12,7 @@ doc_to_text: !function utils.sparbench_doc_to_text
 doc_to_target: "answer"
 generation_kwargs:
   max_new_tokens: 100
+  min_new_tokens: 1
   temperature: 0
   top_p: 1.0
   num_beams: 1
@@ -23,6 +24,7 @@ metric_list:
   - metric: sparbench_score
     aggregation: !function utils.sparbench_aggregate_results
     higher_is_better: true
+
 lmms_eval_specific_kwargs:
   default:
     pre_prompt: ""
